@@ -18,8 +18,8 @@ import (
 	"log"
 	"testing"
 
-	"github.com/casbin/casbin"
-	"github.com/casbin/casbin/util"
+	"github.com/shiyongabc/casbin"
+	"github.com/shiyongabc/casbin/util"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 )

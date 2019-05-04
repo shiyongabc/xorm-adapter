@@ -18,8 +18,8 @@ import (
 	"errors"
 	"runtime"
 
-	"github.com/casbin/casbin/model"
-	"github.com/casbin/casbin/persist"
+	"github.com/shiyongabc/casbin/model"
+	"github.com/shiyongabc/casbin/persist"
 	"github.com/go-xorm/xorm"
 	"github.com/lib/pq"
 )
