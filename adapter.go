@@ -18,20 +18,22 @@ import (
 	"errors"
 	"runtime"
 
+	"strings"
+	"github.com/lib/pq"
 	"github.com/shiyongabc/casbin/model"
 	"github.com/shiyongabc/casbin/persist"
-	"github.com/go-xorm/xorm"
-	"github.com/lib/pq"
+	"xorm.io/xorm"
+
 )
 
 type CasbinRule struct {
-	PType string `xorm:"varchar(100) index"`
-	V0    string `xorm:"varchar(100) index"`
-	V1    string `xorm:"varchar(100) index"`
-	V2    string `xorm:"varchar(100) index"`
-	V3    string `xorm:"varchar(100) index"`
-	V4    string `xorm:"varchar(100) index"`
-	V5    string `xorm:"varchar(100) index"`
+	PType string `xorm:"varchar(100) index not null default ''"`
+	V0    string `xorm:"varchar(100) index not null default ''"`
+	V1    string `xorm:"varchar(100) index not null default ''"`
+	V2    string `xorm:"varchar(100) index not null default ''"`
+	V3    string `xorm:"varchar(100) index not null default ''"`
+	V4    string `xorm:"varchar(100) index not null default ''"`
+	V5    string `xorm:"varchar(100) index not null default ''"`
 }
 
 // Adapter represents the Xorm adapter for policy storage.
@@ -44,7 +46,10 @@ type Adapter struct {
 
 // finalizer is the destructor for Adapter.
 func finalizer(a *Adapter) {
-	a.engine.Close()
+	err := a.engine.Close()
+	if err != nil {
+		panic(err)
+	}
 }
 
 // NewAdapter is the constructor for Adapter.
@@ -52,7 +57,7 @@ func finalizer(a *Adapter) {
 // It's up to whether you have specified an existing DB in dataSourceName.
 // If dbSpecified == true, you need to make sure the DB in dataSourceName exists.
 // If dbSpecified == false, the adapter will automatically create a DB named "casbin".
-func NewAdapter(driverName string, dataSourceName string, dbSpecified ...bool) *Adapter {
+func NewAdapter(driverName string, dataSourceName string, dbSpecified ...bool) (*Adapter, error) {
 	a := &Adapter{}
 	a.driverName = driverName
 	a.dataSourceName = dataSourceName
@@ -62,16 +67,32 @@ func NewAdapter(driverName string, dataSourceName string, dbSpecified ...bool) *
 	} else if len(dbSpecified) == 1 {
 		a.dbSpecified = dbSpecified[0]
 	} else {
-		panic(errors.New("invalid parameter: dbSpecified"))
+		return nil, errors.New("invalid parameter: dbSpecified")
 	}
 
 	// Open the DB, create it if not existed.
-	a.open()
+	err := a.open()
+	if err != nil {
+		return nil, err
+	}
 
 	// Call the destructor when the object is released.
 	runtime.SetFinalizer(a, finalizer)
 
-	return a
+	return a, nil
+}
+
+func NewAdapterByEngine(engine *xorm.Engine) (*Adapter, error) {
+	a := &Adapter{
+		engine: engine,
+	}
+
+	err := a.createTable()
+	if err != nil {
+		return nil, err
+	}
+
+	return a, nil
 }
 
 func (a *Adapter) createDatabase() error {
@@ -85,33 +106,38 @@ func (a *Adapter) createDatabase() error {
 	if err != nil {
 		return err
 	}
-	defer engine.Close()
 
 	if a.driverName == "postgres" {
 		if _, err = engine.Exec("CREATE DATABASE casbin"); err != nil {
 			// 42P04 is	duplicate_database
 			if pqerr, ok := err.(*pq.Error); ok && pqerr.Code == "42P04" {
+				engine.Close()
 				return nil
 			}
 		}
 	} else if a.driverName != "sqlite3" {
 		_, err = engine.Exec("CREATE DATABASE IF NOT EXISTS casbin")
 	}
-	return err
+	if err != nil {
+		engine.Close()
+		return err
+	}
+
+	return engine.Close()
 }
 
-func (a *Adapter) open() {
+func (a *Adapter) open() error {
 	var err error
 	var engine *xorm.Engine
 
 	if a.dbSpecified {
 		engine, err = xorm.NewEngine(a.driverName, a.dataSourceName)
 		if err != nil {
-			panic(err)
+			return err
 		}
 	} else {
 		if err = a.createDatabase(); err != nil {
-			panic(err)
+			return err
 		}
 
 		if a.driverName == "postgres" {
@@ -122,63 +148,70 @@ func (a *Adapter) open() {
 			engine, err = xorm.NewEngine(a.driverName, a.dataSourceName+"casbin")
 		}
 		if err != nil {
-			panic(err)
+			return err
 		}
 	}
 
 	a.engine = engine
 
-	a.createTable()
+	return a.createTable()
 }
 
-func (a *Adapter) close() {
-	a.engine.Close()
+func (a *Adapter) close() error {
+	err := a.engine.Close()
+	if err != nil {
+		return err
+	}
+
 	a.engine = nil
+	return nil
 }
 
-func (a *Adapter) createTable() {
-	err := a.engine.Sync2(new(CasbinRule))
-	if err != nil {
-		panic(err)
-	}
+func (a *Adapter) createTable() error {
+	return a.engine.Sync2(new(CasbinRule))
 }
 
-func (a *Adapter) dropTable() {
-	err := a.engine.DropTables(new(CasbinRule))
-	if err != nil {
-		panic(err)
-	}
+func (a *Adapter) dropTable() error {
+	return a.engine.DropTables(new(CasbinRule))
 }
 
-func loadPolicyLine(line CasbinRule, model model.Model) {
-	lineText := line.PType
-	if line.V0 != "" {
-		lineText += ", " + line.V0
+func loadPolicyLine(line *CasbinRule, model model.Model) {
+	const prefixLine = ", "
+	var sb strings.Builder
+
+	sb.WriteString(line.PType)
+	if len(line.V0) > 0 {
+		sb.WriteString(prefixLine)
+		sb.WriteString(line.V0)
 	}
-	if line.V1 != "" {
-		lineText += ", " + line.V1
+	if len(line.V1) > 0 {
+		sb.WriteString(prefixLine)
+		sb.WriteString(line.V1)
 	}
-	if line.V2 != "" {
-		lineText += ", " + line.V2
+	if len(line.V2) > 0 {
+		sb.WriteString(prefixLine)
+		sb.WriteString(line.V2)
 	}
-	if line.V3 != "" {
-		lineText += ", " + line.V3
+	if len(line.V3) > 0 {
+		sb.WriteString(prefixLine)
+		sb.WriteString(line.V3)
 	}
-	if line.V4 != "" {
-		lineText += ", " + line.V4
+	if len(line.V4) > 0 {
+		sb.WriteString(prefixLine)
+		sb.WriteString(line.V4)
 	}
-	if line.V5 != "" {
-		lineText += ", " + line.V5
+	if len(line.V5) > 0 {
+		sb.WriteString(prefixLine)
+		sb.WriteString(line.V5)
 	}
 
-	persist.LoadPolicyLine(lineText, model)
+	persist.LoadPolicyLine(sb.String(), model)
 }
 
 // LoadPolicy loads policy from database.
 func (a *Adapter) LoadPolicy(model model.Model) error {
-	var lines []CasbinRule
-	err := a.engine.Find(&lines)
-	if err != nil {
+	var lines []*CasbinRule
+	if err := a.engine.Find(&lines); err != nil {
 		return err
 	}
 
@@ -189,26 +222,26 @@ func (a *Adapter) LoadPolicy(model model.Model) error {
 	return nil
 }
 
-func savePolicyLine(ptype string, rule []string) CasbinRule {
-	line := CasbinRule{}
+func savePolicyLine(ptype string, rule []string) *CasbinRule {
+	line := &CasbinRule{PType: ptype}
 
-	line.PType = ptype
-	if len(rule) > 0 {
+	l := len(rule)
+	if l > 0 {
 		line.V0 = rule[0]
 	}
-	if len(rule) > 1 {
+	if l > 1 {
 		line.V1 = rule[1]
 	}
-	if len(rule) > 2 {
+	if l > 2 {
 		line.V2 = rule[2]
 	}
-	if len(rule) > 3 {
+	if l > 3 {
 		line.V3 = rule[3]
 	}
-	if len(rule) > 4 {
+	if l > 4 {
 		line.V4 = rule[4]
 	}
-	if len(rule) > 5 {
+	if l > 5 {
 		line.V5 = rule[5]
 	}
 
@@ -217,10 +250,16 @@ func savePolicyLine(ptype string, rule []string) CasbinRule {
 
 // SavePolicy saves policy to database.
 func (a *Adapter) SavePolicy(model model.Model) error {
-	a.dropTable()
-	a.createTable()
+	err := a.dropTable()
+	if err != nil {
+		return err
+	}
+	err = a.createTable()
+	if err != nil {
+		return err
+	}
 
-	var lines []CasbinRule
+	var lines []*CasbinRule
 
 	for ptype, ast := range model["p"] {
 		for _, rule := range ast.Policy {
@@ -236,7 +275,7 @@ func (a *Adapter) SavePolicy(model model.Model) error {
 		}
 	}
 
-	_, err := a.engine.Insert(&lines)
+	_, err = a.engine.Insert(&lines)
 	return err
 }
 
@@ -256,26 +295,26 @@ func (a *Adapter) RemovePolicy(sec string, ptype string, rule []string) error {
 
 // RemoveFilteredPolicy removes policy rules that match the filter from the storage.
 func (a *Adapter) RemoveFilteredPolicy(sec string, ptype string, fieldIndex int, fieldValues ...string) error {
-	line := CasbinRule{}
+	line := &CasbinRule{PType: ptype}
 
-	line.PType = ptype
-	if fieldIndex <= 0 && 0 < fieldIndex + len(fieldValues) {
-		line.V0 = fieldValues[0 - fieldIndex]
+	idx := fieldIndex + len(fieldValues)
+	if fieldIndex <= 0 && idx > 0 {
+		line.V0 = fieldValues[0-fieldIndex]
 	}
-	if fieldIndex <= 1 && 1 < fieldIndex + len(fieldValues) {
-		line.V1 = fieldValues[1 - fieldIndex]
+	if fieldIndex <= 1 && idx > 1 {
+		line.V1 = fieldValues[1-fieldIndex]
 	}
-	if fieldIndex <= 2 && 2 < fieldIndex + len(fieldValues) {
-		line.V2 = fieldValues[2 - fieldIndex]
+	if fieldIndex <= 2 && idx > 2 {
+		line.V2 = fieldValues[2-fieldIndex]
 	}
-	if fieldIndex <= 3 && 3 < fieldIndex + len(fieldValues) {
-		line.V3 = fieldValues[3 - fieldIndex]
+	if fieldIndex <= 3 && idx > 3 {
+		line.V3 = fieldValues[3-fieldIndex]
 	}
-	if fieldIndex <= 4 && 4 < fieldIndex + len(fieldValues) {
-		line.V4 = fieldValues[4 - fieldIndex]
+	if fieldIndex <= 4 && idx > 4 {
+		line.V4 = fieldValues[4-fieldIndex]
 	}
-	if fieldIndex <= 5 && 5 < fieldIndex + len(fieldValues) {
-		line.V5 = fieldValues[5 - fieldIndex]
+	if fieldIndex <= 5 && idx > 5 {
+		line.V5 = fieldValues[5-fieldIndex]
 	}
 
 	_, err := a.engine.Delete(line)
